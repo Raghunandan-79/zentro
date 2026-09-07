@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use actix_web::{App, HttpResponse, HttpServer, Responder, post, web::{self, Json}};
+use actix_web::{App, HttpResponse, HttpServer, Responder, post, web::{self, Data, Json}};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -10,7 +8,7 @@ struct SignupInput {
 }
 
 #[post("/signup")]
-async fn sign_up(body: Json<SignupInput>, app_state: web::Data<Arc<AppState>>) -> impl Responder {
+async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> impl Responder {
     println!("{}", body.username);
     println!("{}", body.password);
     println!("{}", app_state.users.len());
@@ -30,13 +28,13 @@ struct AppState {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let app_state: Arc<AppState> = Arc::new(AppState {
+    let app_state: Data<AppState> = web::Data::new(AppState {
         users: vec![]
     });
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(app_state.clone()))
+            .app_data(app_state.clone())
             .service(sign_up)
     })
     .bind(("127.0.0.1", 3001))?
