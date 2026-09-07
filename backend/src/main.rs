@@ -17,6 +17,17 @@ struct SignupResponse {
     message: String,
 }
 
+struct User {
+    id: u32,
+    username: String,
+    password: String,
+}
+
+struct AppState {
+    user_index: Mutex<u32>,
+    users: Mutex<Vec<User>>,
+}
+
 #[post("/signup")]
 async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> impl Responder {
     let mut users: MutexGuard<'_, Vec<User>> = app_state.users.lock().unwrap();
@@ -44,17 +55,6 @@ async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> imp
     HttpResponse::Unauthorized().json(SignupResponse {
         message: String::from("User already exists")
     })
-}
-
-struct User {
-    id: u32,
-    username: String,
-    password: String,
-}
-
-struct AppState {
-    user_index: Mutex<u32>,
-    users: Mutex<Vec<User>>,
 }
 
 #[actix_web::main]
