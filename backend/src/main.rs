@@ -1,75 +1,50 @@
-use std::sync::{Mutex, MutexGuard};
+use std::{collections::HashMap, sync::{Mutex, mpsc::{self, Sender}}};
 
-use actix_web::{
-    App, HttpResponse, HttpServer, Responder, post,
-    web::{self, Data, Json},
-};
-use serde::{Deserialize, Serialize};
+use actix_web::{App, HttpServer, web::{self, Data}};
+use dotenvy::dotenv;
 
-#[derive(Serialize, Deserialize)]
-struct SignupInput {
-    pub username: String,
-    pub password: String,
-}
+use crate::{routes::user::{balance, deposit, onramp, sign_in, sign_up}, types::user::User};
 
-#[derive(Serialize, Deserialize)]
-struct SignupResponse {
-    message: String,
-}
+pub mod types;
+pub mod routes;
+pub mod middleware;
+pub mod config;
 
-struct User {
-    id: u32,
-    username: String,
-    password: String,
+enum BalanceMessage {
+    Onramp(u32, u32),
+    GetBalance(u32, futures::channel::oneshot::Sender<u32>)
 }
 
 struct AppState {
     user_index: Mutex<u32>,
     users: Mutex<Vec<User>>,
-}
-
-#[post("/signup")]
-async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> impl Responder {
-    let mut users: MutexGuard<'_, Vec<User>> = app_state.users.lock().unwrap();
-    let mut users_index: MutexGuard<'_, u32> = app_state.user_index.lock().unwrap();
-
-    let user_found: Option<&User> = users.iter().find(|u: &&User| u.username == body.username);
-
-    if user_found.is_none() {
-        *users_index = *users_index + 1;
-        users.push(User {
-            id: users_index.clone(),
-            username: body.username.clone(),
-            password: body.password.clone(),
-        });
-
-        println!("{}", users.len());
-
-        drop(users); // unlocking the users
-
-        return HttpResponse::Ok().json(SignupResponse {
-            message: String::from("Successfully signed up"),
-        });
-    }
-
-    HttpResponse::Unauthorized().json(SignupResponse {
-        message: String::from("User already exists"),
-    })
+    stock_balances: Mutex<HashMap<u32, HashMap<String, u32>>>,
+    balances_tx: Sender<BalanceMessage>
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
+
+    let (tx, rx) = mpsc::channel();
+    
     let app_state: Data<AppState> = web::Data::new(AppState {
-        user_index: Mutex::new(0),
         users: Mutex::new(vec![]),
+        user_index: Mutex::new(0),
+        stock_balances: Mutex::new(HashMap::new()),
+        balances_tx: tx
     });
 
-    HttpServer::new(move || 
-        App::new().app_data(
-            app_state.clone()
-        )
-        .service(sign_up))
-        .bind(("127.0.0.1", 3001))?
-        .run()
-        .await
+    HttpServer::new(move || {
+        App::new()
+            .app_data(app_state.clone())
+            .service(sign_up)
+            .service(sign_in)
+            .service(balance)
+            .service(onramp)
+            .service(deposit)
+    })
+    .bind(("127.0.0.1", 3001))?
+    .run()
+    .await
 }
