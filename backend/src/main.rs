@@ -53,7 +53,7 @@ async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> imp
     }
 
     HttpResponse::Unauthorized().json(SignupResponse {
-        message: String::from("User already exists")
+        message: String::from("User already exists"),
     })
 }
 
@@ -64,7 +64,11 @@ async fn main() -> std::io::Result<()> {
         users: Mutex::new(vec![]),
     });
 
-    HttpServer::new(move || App::new().app_data(app_state.clone()).service(sign_up))
+    HttpServer::new(move || 
+        App::new().app_data(
+            app_state.clone()
+        )
+        .service(sign_up))
         .bind(("127.0.0.1", 3001))?
         .run()
         .await
