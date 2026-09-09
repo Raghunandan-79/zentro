@@ -1,11 +1,11 @@
-use std::{collections::HashMap, sync::{MutexGuard, mpsc}};
+use std::{collections::HashMap, sync::{MutexGuard}};
 
 use actix_web::{HttpResponse, Responder, get, post, web::{self, Json}};
 use chrono::{Duration, Utc};
 use futures::channel::oneshot;
 use jsonwebtoken::{EncodingKey, Header, encode};
 
-use crate::{AppState, BalanceMessage::Onramp, middleware::AuthUser, types::user::{BalanceResponse, Claims, DepositRequest, DespositResponse, OnRampRequest, SigninInput, SigninResponse, SignupInput, SignupResponse, User}};
+use crate::{AppState, BalanceMessage::Onramp, StockBalanceMessage, config::jwt_secret, middleware::AuthUser, types::user::{BalanceResponse, Claims, DepositRequest, DespositResponse, OnRampRequest, SigninInput, SigninResponse, SignupInput, SignupResponse, User}};
 
 #[post("/signup")]
 async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> impl Responder {
@@ -23,9 +23,7 @@ async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> imp
         });
 
         app_state.balances_tx.send(Onramp(user_index.clone(), 0));
-        
-        let mut stock_balances: MutexGuard<'_, HashMap<u32, HashMap<String, u32>>> = app_state.stock_balances.lock().unwrap();
-        stock_balances.insert(user_index.clone(), HashMap::new());
+        app_state.stock_balances_tx.send(StockBalanceMessage::InitUser(*user_index));
 
         HttpResponse::Ok().json(SignupResponse {
             message: String::from("Successfully signed up")
@@ -39,8 +37,8 @@ async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> imp
 
 #[post("/signin")]
 pub async fn sign_in(app_state: web::Data<AppState>, body: Json<SigninInput>) -> impl Responder {
-    let mut users: MutexGuard<'_, Vec<User>> = app_state.users.lock().unwrap();
-    let user_found: Option<&User> = users.iter().find(|u| u.username == body.username && u.password == body.password);
+    let users: MutexGuard<'_, Vec<User>> = app_state.users.lock().unwrap();
+    let user_found: Option<&User> = users.iter().find(|u: &&User| u.username == body.username && u.password == body.password);
 
     if user_found.is_none() {
         return HttpResponse::Unauthorized().json(SignupResponse {
@@ -60,7 +58,11 @@ pub async fn sign_in(app_state: web::Data<AppState>, body: Json<SigninInput>) ->
         exp
     };
 
-    let token: String = encode(&Header::default(), &claims, &EncodingKey::from_secret("secret".as_ref())).unwrap();
+    let token: String = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret().as_bytes())
+    ).unwrap();
     
     HttpResponse::Ok().json(SigninResponse {
         token
@@ -76,7 +78,9 @@ pub async fn balance(app_state: web::Data<AppState>, user: AuthUser) -> impl Res
 
     let usd_balance: u32 = rx.await.unwrap();
 
-    let stock_balances: HashMap<String, u32> = app_state.stock_balances.lock().unwrap().get(&user_id).unwrap_or(&HashMap::new()).clone();
+    let (stock_tx, stock_rx) = oneshot::channel::<HashMap<String, u32>>();
+    app_state.stock_balances_tx.send(StockBalanceMessage::GetBalances(user_id, stock_tx));
+    let stock_balances: HashMap<String, u32> = stock_rx.await.unwrap();
 
     HttpResponse::Ok().json(BalanceResponse {
         usd_balance: usd_balance,
@@ -97,17 +101,13 @@ pub async fn deposit(app_state: web::Data<AppState>, user: AuthUser, symbol: web
     let user_id: u32 = user.0;
     let symbol: String = symbol.into_inner();
 
-    let mut stock_balances: MutexGuard<'_, HashMap<u32, HashMap<String, u32>>> = app_state.stock_balances.lock().unwrap();
-    let user_balances: &mut HashMap<String, u32> = stock_balances.entry(user_id).or_insert_with(HashMap::new);
-    let existing_balance: u32 = user_balances.get(&symbol).unwrap_or(&0).clone();
-    user_balances.insert(symbol, existing_balance + body.qty);
+    app_state.stock_balances_tx.send(StockBalanceMessage::Deposit(user_id, symbol, body.qty));
 
     HttpResponse::Ok().json(DespositResponse {
         message: String::from("Successfully deposited")
     })
 }
 
-// order endpoint.
 #[post("/order")]
 pub async fn order() -> impl Responder {
     HttpResponse::Ok()
