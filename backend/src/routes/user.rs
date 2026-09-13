@@ -5,7 +5,7 @@ use chrono::{Duration, Utc};
 use futures::channel::oneshot;
 use jsonwebtoken::{EncodingKey, Header, encode};
 
-use crate::{AppState, BalanceMessage::Onramp, StockBalanceMessage, config::jwt_secret, middleware::AuthUser, types::user::{BalanceResponse, Claims, DepositRequest, DespositResponse, OnRampRequest, SigninInput, SigninResponse, SignupInput, SignupResponse, User}};
+use crate::{AppState, BalanceMessage::Onramp, OrderFill, StockBalanceMessage, config::jwt_secret, middleware::AuthUser, types::user::{BalanceResponse, Claims, DepositRequest, DespositResponse, OnRampRequest, OrderRequest, OrderResponse, SigninInput, SigninResponse, SignupInput, SignupResponse, User}};
 
 #[post("/signup")]
 async fn sign_up(body: Json<SignupInput>, app_state: web::Data<AppState>) -> impl Responder {
@@ -109,11 +109,179 @@ pub async fn deposit(app_state: web::Data<AppState>, user: AuthUser, symbol: web
 }
 
 #[post("/order")]
-pub async fn order() -> impl Responder {
-    HttpResponse::Ok()
-}
+pub async fn order(
+    app_state: web::Data<AppState>,
+    user: AuthUser,
+    body: Json<OrderRequest>,
+) -> impl Responder {
+    let user_id: u32 = user.0;
 
-#[post("/cancel")]
-pub async fn cancel() -> impl Responder {
-    HttpResponse::Ok()
+    if body.side == "bid" {
+        // Check if user has enough funds
+        let amount_to_spend = body.price * body.qty;
+        let (balance_tx, balance_rx) = futures::channel::oneshot::channel();
+        app_state
+            .balances_tx
+            .send(crate::BalanceMessage::GetAvailable(user_id, balance_tx))
+            .unwrap();
+
+        let user_balance = balance_rx.await.unwrap();
+
+        if user_balance < amount_to_spend {
+            return HttpResponse::BadRequest().json(OrderResponse {
+                message: String::from("You have insufficient funds"),
+            });
+        }
+
+        if body.asset == "sol" {
+            // Place order on orderbook
+            let (order_tx, order_rx) = futures::channel::oneshot::channel();
+            app_state
+                .order_tx
+                .send(crate::OrderMessage::PlaceOrder {
+                    user_id,
+                    side: body.side.clone(),
+                    price: body.price,
+                    qty: body.qty,
+                    asset: body.asset.clone(),
+                    response_tx: order_tx,
+                })
+                .unwrap();
+
+            let fills = order_rx.await.unwrap();
+
+            for fill in fills {
+                match fill {
+                    OrderFill::Fill {
+                        buyer,
+                        seller,
+                        price,
+                        qty,
+                    } => {
+                        // Update stock balances - buyer gets stock
+                        app_state
+                            .stock_balances_tx
+                            .send(StockBalanceMessage::TransferStock(
+                                seller,
+                                buyer,
+                                "sol".to_string(),
+                                qty,
+                            ))
+                            .unwrap();
+
+                        // Update USD balances - seller gets money
+                        app_state
+                            .balances_tx
+                            .send(crate::BalanceMessage::TransferAvailable(
+                                buyer,
+                                seller,
+                                price * qty,
+                            ))
+                            .unwrap();
+                    }
+                    OrderFill::OrderbookUpdate { price, qty } => {
+                        // Lock funds for unfilled order
+                        app_state
+                            .balances_tx
+                            .send(crate::BalanceMessage::LockFunds(user_id, price * qty))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+
+        return HttpResponse::Ok().json(OrderResponse {
+            message: String::from("Order placed successfully"),
+        });
+    }
+
+    if body.side == "ask" {
+        // Check if user has enough stock
+        let (stock_tx, stock_rx) = futures::channel::oneshot::channel();
+        app_state
+            .stock_balances_tx
+            .send(StockBalanceMessage::GetAvailable(
+                user_id,
+                body.asset.clone(),
+                stock_tx,
+            ))
+            .unwrap();
+
+        let existing_amount = stock_rx.await.unwrap();
+
+        if body.qty > existing_amount {
+            return HttpResponse::BadRequest().json(OrderResponse {
+                message: String::from("You have insufficient stocks"),
+            });
+        }
+
+        if body.asset == "sol" {
+            // Place order on orderbook
+            let (order_tx, order_rx) = futures::channel::oneshot::channel();
+            app_state
+                .order_tx
+                .send(crate::OrderMessage::PlaceOrder {
+                    user_id,
+                    side: body.side.clone(),
+                    price: body.price,
+                    qty: body.qty,
+                    asset: body.asset.clone(),
+                    response_tx: order_tx,
+                })
+                .unwrap();
+
+            let fills = order_rx.await.unwrap();
+
+            for fill in fills {
+                match fill {
+                    OrderFill::Fill {
+                        buyer,
+                        seller,
+                        price,
+                        qty,
+                    } => {
+                        // Transfer stock from seller to buyer
+                        app_state
+                            .stock_balances_tx
+                            .send(StockBalanceMessage::TransferStock(
+                                seller,
+                                buyer,
+                                "sol".to_string(),
+                                qty,
+                            ))
+                            .unwrap();
+
+                        // Transfer money from buyer to seller
+                        app_state
+                            .balances_tx
+                            .send(crate::BalanceMessage::TransferAvailable(
+                                buyer,
+                                seller,
+                                price * qty,
+                            ))
+                            .unwrap();
+                    }
+                    OrderFill::OrderbookUpdate { qty, .. } => {
+                        // Lock stock for unfilled order
+                        app_state
+                            .stock_balances_tx
+                            .send(StockBalanceMessage::LockStock(
+                                user_id,
+                                body.asset.clone(),
+                                qty,
+                            ))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+
+        return HttpResponse::Ok().json(OrderResponse {
+            message: String::from("Order placed successfully"),
+        });
+    }
+
+    HttpResponse::BadRequest().json(OrderResponse {
+        message: String::from("Invalid order side"),
+    })
 }

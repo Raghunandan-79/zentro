@@ -62,3 +62,16 @@ pub struct BalanceResponse {
     pub usd_balance: u32,
     pub stock_balances: HashMap<String, u32>,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct OrderRequest {
+    pub side: String, // "bid" or "ask"
+    pub price: u32,
+    pub qty: u32,
+    pub asset: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct OrderResponse {
+    pub message: String,
+}
